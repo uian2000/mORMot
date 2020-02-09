@@ -1110,21 +1110,21 @@ type
     fRestServer: TSQLRestServerDB;
     // Http server
     fHttpServer: TSQLHttpServer;
-    /// Will create as many Clients as specified by aClient.
-    // - Each client will perform as many Requests as specified by aRequests.
-    // - This function will wait for all Clients until finished.
+    /// will create as many Clients as specified by aClient.
+    // - each client will perform as many Requests as specified by aRequests.
+    // - this function will wait for all Clients until finished.
     function ClientTest(const aClients, aRequests: integer): boolean;
   protected
-    /// Cleaning up the test
+    /// cleaning up the test
     procedure CleanUp; override;
   published
-    /// Delete any old Test database on start
+    /// delete any old Test database on start
     procedure DeleteOldDatabase;
-    /// Start the whole DDD Server (http and rest)
+    /// start the whole DDD Server (http and rest)
     procedure StartServer;
-    /// Test straight-forward access using 1 thread and 1 client
+    /// test straight-forward access using 1 thread and 1 client
     procedure SingleClientTest;
-    /// Test concurrent access with multiple clients
+    /// test concurrent access with multiple clients
     procedure MultiThreadedClientsTest;
   end;
 
@@ -1442,12 +1442,120 @@ begin
   v := UnCamelCase('GoodBBCProgram'); Check(v='Good BBC program');
 end;
 
+function GetBitsCount64(const Bits; Count: PtrInt): PtrInt;
+begin // reference implementation
+  result := 0;
+  while Count>0 do begin
+    dec(Count);
+    if Count in TBits64(Bits) then // bt dword[rdi],edx is slow in such a loop
+      inc(result);                 // ... but correct :)
+  end;
+end;
+
+function GetBitsCountPurePascal(value: PtrInt): PtrInt;
+begin
+  result := value;
+  {$ifdef CPU64}
+  result := result-((result shr 1) and $5555555555555555);
+  result := (result and $3333333333333333)+((result shr 2) and $3333333333333333);
+  result := (result+(result shr 4)) and $0f0f0f0f0f0f0f0f;
+  inc(result,result shr 8); // avoid slow multiplication
+  inc(result,result shr 16);
+  inc(result,result shr 32);
+  result := result and $7f;
+  {$else}
+  result := result-((result shr 1) and $55555555);
+  result := (result and $33333333)+((result shr 2) and $33333333);
+  result := (result+(result shr 4)) and $0f0f0f0f;
+  inc(result,result shr 8);
+  inc(result,result shr 16);
+  result := result and $3f;
+  {$endif CPU64}
+end;
+
 procedure TTestLowLevelCommon.Bits;
+const N = 1000000;
+  procedure TestPopCnt(const ctxt: string);
+  var timer: TPrecisionTimer;
+      i,c: integer;
+      v: QWord;
+  begin
+    CheckEqual(GetBitsCountPtrInt(0),0);
+    CheckEqual(GetBitsCountPtrInt($f),4);
+    CheckEqual(GetBitsCountPtrInt($ff),8);
+    CheckEqual(GetBitsCountPtrInt($fff),12);
+    CheckEqual(GetBitsCountPtrInt($ffff),16);
+    CheckEqual(GetBitsCountPtrInt(-1),POINTERBITS);
+    v := PtrUInt(-1);
+    CheckEqual(GetBitsCount(v,0),0);
+    CheckEqual(GetBitsCount64(v,0),0);
+    for i := 0 to POINTERBITS-1 do begin
+      CheckEqual(GetBitsCountPtrInt(PtrInt(1) shl i),1);
+      if i<POINTERBITS-1 then begin
+        CheckEqual(GetBitsCountPtrInt(PtrInt(3) shl i),2);
+        CheckEqual(GetBitsCountPtrInt((PtrInt(1) shl (i+1))-1),i+1);
+      end;
+      if i<POINTERBITS-2 then
+        CheckEqual(GetBitsCountPtrInt(PtrInt(7) shl i),3);
+      if i<POINTERBITS-3 then
+        CheckEqual(GetBitsCountPtrInt(PtrInt(15) shl i),4);
+      CheckEqual(GetBitsCount64(v,i+1),i+1);
+      CheckEqual(GetBitsCount(v,i+1),i+1);
+    end;
+    for i := 1 to 32 do begin
+      v := ALLBITS_CARDINAL[i];
+      CheckEqual(GetBitsCountPtrInt(v),i);
+      CheckEqual(GetBitsCount(v,POINTERBITS),i);
+      CheckEqual(GetBitsCount(v,i),i);
+    end;
+    for i := 1 to 1000 do begin
+      v := i;
+      c := GetBitsCount64(v,POINTERBITS);
+      CheckEqual(GetBitsCountPtrInt(v),c);
+      CheckEqual(GetBitsCount(v,POINTERBITS),c);
+      {$ifdef FPC}CheckEqual(popcnt(v),c);{$endif}
+      v := v*v*19;
+      c := GetBitsCount64(v,POINTERBITS);
+      CheckEqual(GetBitsCountPtrInt(v),c);
+      {$ifdef FPC}CheckEqual(popcnt(v),c);{$endif}
+      v := random32gsl{$ifdef CPU64}or (PtrUInt(random32gsl) shl 32){$endif};
+      c := GetBitsCount64(v,POINTERBITS);
+      CheckEqual(GetBitsCountPtrInt(v),c);
+      CheckEqual(GetBitsCount(v,POINTERBITS),c);
+      {$ifdef FPC}CheckEqual(popcnt(v),c);{$endif}
+    end;
+    timer.Start;
+    for i := 1 to N do
+      GetBitsCountPtrInt(i);
+    NotifyTestSpeed(ctxt,N,N shl POINTERSHR,@timer);
+  end;
 var Bits: array[byte] of byte;
     Bits64: Int64 absolute Bits;
     Si,i: integer;
     c: cardinal;
+    {$ifdef FPC}
+    u: {$ifdef CPU64}QWord{$else}DWord{$endif};
+    timer: TPrecisionTimer;
+    {$endif FPC}
 begin
+  {$ifdef CPUINTEL}
+  GetBitsCountPtrInt := @GetBitsCountPurePascal;
+  TestPopCnt('pas');
+  GetBitsCountPtrInt := @GetBitsCountPas; // x86/x86_64 assembly
+  TestPopCnt('asm');
+  if cfPOPCNT in CpuFeatures then begin
+    GetBitsCountPtrInt := @GetBitsCountSSE42;
+    TestPopCnt('sse4.2');
+  end;
+  {$else}
+  TestPopCnt('pas');
+  {$endif CPUINTEL}
+  {$ifdef FPC}
+  timer.Start;
+  for u := 1 to N do
+    i := popcnt(u);
+  NotifyTestSpeed('FPC',N,N shl POINTERSHR,@timer);
+  {$endif FPC}
   FillcharFast(Bits,sizeof(Bits),0);
   for i := 0 to high(Bits)*8+7 do
     Check(not GetBit(Bits,i));
@@ -3878,6 +3986,7 @@ procedure TTestLowLevelCommon.NumericalConversions;
 var i, j, b, err: integer;
     juint: cardinal absolute j;
     k,l: Int64;
+    q: QWord;
     s,s2: RawUTF8;
     d,e: double;
     {$ifndef DELPHI5OROLDER}
@@ -3890,7 +3999,7 @@ var i, j, b, err: integer;
     st: TFastReader;
     PB,PC: PByte;
     P: PUTF8Char;
-    crc, n: cardinal;
+    crc, u32, n: cardinal;
     Timer: TPrecisionTimer;
 begin
   Check(Plural('row',0)='0 row');
@@ -4107,41 +4216,41 @@ begin
     u := string(a);
     Check(SysUtils.IntToStr(j)=u);
     s2 := Int32ToUtf8(j);
-    Check(s2=s);
+    CheckEqual(s2,s);
     Check(format('%d',[j])=u);
     Check(GetInteger(pointer(s))=j);
 {$ifndef DELPHI5OROLDER}
-    Check(FormatUTF8('%',[j])=s);
-    Check(FormatUTF8('?',[],[j])=':('+s+'):');
-    Check(FormatUTF8('%?',[j])=s+'?');
-    Check(FormatUTF8('?%',[j])='?'+s);
-    Check(FormatUTF8('?%?',[j])='?'+s+'?');
-    Check(FormatUTF8('?%%?',[j])='?'+s+'?');
-    Check(FormatUTF8('?%?%  ',[j])='?'+s+'?  ');
-    Check(FormatUTF8('?%',[],[j])=':('+s+'):');
-    Check(FormatUTF8('%?',[j],[j])=s+':('+s+'):');
-    Check(FormatUTF8('%?',[s],[s])=s+':('''+s+'''):');
-    Check(FormatUTF8('% ',[j])=s+' ');
-    Check(FormatUTF8('? ',[],[j])=':('+s+'): ');
-    Check(FormatUTF8('% %',[j])=s+' ');
-    Check(FormatUTF8(' % %',[j])=' '+s+' ');
-    Check(FormatUTF8(' ?? ',[],[j])=' :('+s+'): ');
-    Check(FormatUTF8('?',[],[j],true)=s);
-    Check(FormatUTF8('?%',[],[j],true)=''+s+'');
-    Check(FormatUTF8('? ',[],[j],true)=''+s+' ');
-    Check(FormatUTF8(' ?? ',[],[j],true)=' '+s+' ');
-    Check(FormatUTF8('?%',[],[s],true)='"'+s+'"');
-    Check(FormatUTF8(' ?? ',[],[s],true)=' "'+s+'" ');
-    Check(FormatUTF8('? %',[s],[s],true)='"'+s+'" '+s);
+    CheckEqual(FormatUTF8('%',[j]),s);
+    CheckEqual(FormatUTF8('?',[],[j]),':('+s+'):');
+    CheckEqual(FormatUTF8('%?',[j]),s+'?');
+    CheckEqual(FormatUTF8('?%',[j]),'?'+s);
+    CheckEqual(FormatUTF8('?%?',[j]),'?'+s+'?');
+    CheckEqual(FormatUTF8('?%%?',[j]),'?'+s+'?');
+    CheckEqual(FormatUTF8('?%?%  ',[j]),'?'+s+'?  ');
+    CheckEqual(FormatUTF8('?%',[],[j]),':('+s+'):');
+    CheckEqual(FormatUTF8('%?',[j],[j]),s+':('+s+'):');
+    CheckEqual(FormatUTF8('%?',[s],[s]),s+':('''+s+'''):');
+    CheckEqual(FormatUTF8('% ',[j]),s+' ');
+    CheckEqual(FormatUTF8('? ',[],[j]),':('+s+'): ');
+    CheckEqual(FormatUTF8('% %',[j]),s+' ');
+    CheckEqual(FormatUTF8(' % %',[j]),' '+s+' ');
+    CheckEqual(FormatUTF8(' ?? ',[],[j]),' :('+s+'): ');
+    CheckEqual(FormatUTF8('?',[],[j],true),s);
+    CheckEqual(FormatUTF8('?%',[],[j],true),s);
+    CheckEqual(FormatUTF8('? ',[],[j],true),s+' ');
+    CheckEqual(FormatUTF8(' ?? ',[],[j],true),' '+s+' ');
+    CheckEqual(FormatUTF8('?%',[],[s],true),'"'+s+'"');
+    CheckEqual(FormatUTF8(' ?? ',[],[s],true),' "'+s+'" ');
+    CheckEqual(FormatUTF8('? %',[s],[s],true),'"'+s+'" '+s);
 {$ifndef NOVARIANTS}
-    Check(FormatUTF8(' ?? ',[],[variant(j)],true)=' '+s+' ');
-    Check(FormatUTF8(' ?? ',[],[variant(j)])=' :('''+s+'''): ');
-    Check(FormatUTF8('% ?',[variant(j)],[variant(j)])=s+' :('''+s+'''):');
-    Check(FormatUTF8(' ?? ',[],[variant(s)])=' :('''+s+'''): ');
-    Check(FormatUTF8('% ?',[variant(j)],[variant(j)])=s+' :('''+s+'''):');
-    Check(FormatUTF8('? %',[variant(j)],[variant(j)],true)=s+' '+s);
-    Check(FormatUTF8(' ?? ',[],[variant(s)],true)=' "'+s+'" ');
-    Check(FormatUTF8('? %',[variant(s)],[variant(j)],true)=s+' '+s);
+    CheckEqual(FormatUTF8(' ?? ',[],[variant(j)],true),' '+s+' ');
+    CheckEqual(FormatUTF8(' ?? ',[],[variant(j)]),' :('''+s+'''): ');
+    CheckEqual(FormatUTF8('% ?',[variant(j)],[variant(j)]),s+' :('''+s+'''):');
+    CheckEqual(FormatUTF8(' ?? ',[],[variant(s)]),' :('''+s+'''): ');
+    CheckEqual(FormatUTF8('% ?',[variant(j)],[variant(j)]),s+' :('''+s+'''):');
+    CheckEqual(FormatUTF8('? %',[variant(j)],[variant(j)],true),s+' '+s);
+    CheckEqual(FormatUTF8(' ?? ',[],[variant(s)],true),' "'+s+'" ');
+    CheckEqual(FormatUTF8('? %',[variant(s)],[variant(j)],true),s+' '+s);
 {$endif}
 {$endif}
     k := Int64(j)*Random(MaxInt);
@@ -4210,6 +4319,9 @@ begin
     PB := @varint;
     Check(PtrInt(FromVarUint32(PB))=i);
     Check(PB=PC);
+    PB := FromVarUInt32Safe(@varint,PC,u32);
+    Check(PtrInt(u32)=i);
+    Check(PB=PC);
     PC := ToVarInt32(j,@varint);
     Check(PC<>nil);
     PB := @varint;
@@ -4225,6 +4337,9 @@ begin
     Check(PtrInt(PC)-PtrInt(@varint)=integer(ToVarUInt32Length(juint)));
     PB := @varint;
     Check(PtrUInt(FromVarUint64(PB))=juint);
+    Check(PB=PC);
+    PB := FromVarUInt64Safe(@varint,PC,q);
+    Check(q=juint);
     Check(PB=PC);
     PC := ToVarInt64(k,@varint);
     Check(PC<>nil);
@@ -4494,33 +4609,33 @@ begin
   Check(FormatUTF8('abcd',[U],[WS])='abcd');
 {$endif}
   U := QuotedStr('','"');
-  Check(U='""');
+  CheckEqual(U,'""');
   U := QuotedStr('abc','"');
-  Check(U='"abc"');
+  CheckEqual(U,'"abc"');
   U := QuotedStr('a"c','"');
-  Check(U='"a""c"');
+  CheckEqual(U,'"a""c"');
   U := QuotedStr('abcd"efg','"');
-  Check(U='"abcd""efg"');
+  CheckEqual(U,'"abcd""efg"');
   U := QuotedStr('abcd""efg','"');
-  Check(U='"abcd""""efg"');
+  CheckEqual(U,'"abcd""""efg"');
   U := QuotedStr('abcd"e"fg"','"');
-  Check(U='"abcd""e""fg"""');
+  CheckEqual(U,'"abcd""e""fg"""');
   U := QuotedStr('"abcd"efg','"');
-  Check(U='"""abcd""efg"');
+  CheckEqual(U,'"""abcd""efg"');
   U := QuotedStr('','#'); // also test for custom quote
-  Check(U='##');
+  CheckEqual(U,'##');
   U := QuotedStr('abc','#');
-  Check(U='#abc#');
+  CheckEqual(U,'#abc#');
   U := QuotedStr('a#c','#');
-  Check(U='#a##c#');
+  CheckEqual(U,'#a##c#');
   U := QuotedStr('abcd#efg','#');
-  Check(U='#abcd##efg#');
+  CheckEqual(U,'#abcd##efg#');
   U := QuotedStr('abcd##efg','#');
-  Check(U='#abcd####efg#');
+  CheckEqual(U,'#abcd####efg#');
   U := QuotedStr('abcd#e#fg#','#');
-  Check(U='#abcd##e##fg###');
+  CheckEqual(U,'#abcd##e##fg###');
   U := QuotedStr('#abcd#efg','#');
-  Check(U='###abcd##efg#');
+  CheckEqual(U,'###abcd##efg#');
   for i := 0 to 1000 do begin
     len := i*5;
     W := RandomAnsi7(len);
@@ -5587,12 +5702,12 @@ const
     'application/zip','image/gif');
 var i: integer;
 begin
-  Check(GetMimeContentType(nil,0,'toto.h264')='video/H264');
+  CheckEqual(GetMimeContentType(nil,0,'toto.h264'),'video/H264');
   for i := 0 to high(MIMES)shr 1 do
-    Check(GetMimeContentType(nil,0,'toto.'+MIMES[i*2])=StringToAnsi7(MIMES[i*2+1]),MIMES[i*2]);
+    CheckEqual(GetMimeContentType(nil,0,'toto.'+MIMES[i*2]),ToUTF8(MIMES[i*2+1]));
   for i := 0 to high(BIN) do begin
-    Check(GetMimeContentType(@BIN[i],34,'')=BIN_MIME[i]);
-    Check(GetMimeContentTypeFromBuffer(@BIN[i],34,'')=BIN_MIME[i]);
+    CheckEqual(GetMimeContentType(@BIN[i],34,''),BIN_MIME[i]);
+    CheckEqual(GetMimeContentTypeFromBuffer(@BIN[i],34,''),BIN_MIME[i]);
   end;
 end;
 
@@ -9637,6 +9752,7 @@ begin
   try
     lTable.UpdateFrom(TEST_DATA_1,lRefreshed,nil);
     ndx := lTable.FieldIndex('RELATION_ID');
+    Check(ndx=3);
     lTable.SortFields(ndx);
     doc.Clear;
     i := lTable.SearchFieldSorted('10',{RELATION_ID}ndx);
@@ -9645,7 +9761,8 @@ begin
     doc.Clear;
     i := lTable.SearchFieldSorted('11',{RELATION_ID}ndx);
     lTable.ToDocVariant(i,variant(doc));
-    check(doc.Value['PHONE']='1234');
+    V := doc.Value['PHONE'];
+    check(V='1234');
   finally
     lTable.Free;
   end;
@@ -10533,7 +10650,10 @@ begin
     Check(s=s1+',"Data":"","ValVariant":{"name":"John","int":1234}}');
     bin := T.GetBinary;
     T2.ClearProperties;
-    Check(T2.SetBinary(pointer(bin)));
+    Check(T2.SetBinary(pointer(bin),PAnsiChar(pointer(bin))+length(bin)));
+    Check(T.SameValues(T2));
+    T2.ClearProperties;
+    Check(T2.SetBinary(bin));
     Check(T.SameValues(T2));
     bin := VariantSave(T.ValVariant);
     Check(bin<>'');

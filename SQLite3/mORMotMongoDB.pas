@@ -325,7 +325,7 @@ begin
   if aMongoCollectionName='' then
     aMongoCollectionName := Props.Props.SQLTableName;
   Props.ExternalDB.Init(aClass,aMongoCollectionName,
-    aMongoDatabase.CollectionOrCreate[aMongoCollectionName],true);
+    aMongoDatabase.CollectionOrCreate[aMongoCollectionName],true,[]);
   Props.ExternalDB.MapField('ID','_id');
   result := TSQLRestStorageMongoDB.Create(aClass,aServer);
   aServer.StaticDataAdd(result);
@@ -918,7 +918,7 @@ begin
       if name='' then
         raise EORMMongoDBException.CreateUTF8(
           '%.JSONFromDoc: Unknown field [%] for %',[self,doc.Names[i],fStoredClass]);
-      W.AddFieldName(pointer(name),Length(name));
+      W.AddProp(pointer(name),Length(name));
       W.AddVariant(doc.Values[i],twJSONEscape);
       W.Add(',');
     end;
