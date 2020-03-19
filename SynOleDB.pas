@@ -57,63 +57,6 @@ unit SynOleDB;
   - or take a look at latest patches from Oracle support, and pray it's fixed ;)
     https://stackoverflow.com/a/6661058
 
-
-  Version 1.14
-  - first public release, corresponding to SQLite3 Framework 1.14
-
-  Version 1.15
-  - SynDB unit extracted from previous SynOleDB.pas
-  - several fixes and speed enhancements
-  - made the code compatible with Delphi 5
-  - TOleDBStatement class now follows the prepared statement pattern introduced
-    with its parent TSQLDBStatement
-  - now able to retrieve table names and column information from OleDB metadata
-    including GetTableNames, GetFields, GetFieldDefinitions and GetForeignKey
-    methods - able to use faster direct SQL retrieval (e.g. for Oracle / MS SQL)
-
-  Version 1.16
-  - add some reference to https://synopse.info/fossil/tktview?name=213544b2f5
-    in case of wrong implementation of multi-thread connection (within the
-    THttpServerGeneric mORMot server, for instance)
-
-  Version 1.17
-  - fix issue (depending on OleDB Provider) about ordinal binding error
-  - fix issue about void string parameter binding
-  - fix issue in TOleDBStatement.BindCurrency() method
-  - fix retrieval of table and field metadata, for tables without schema
-    (e.g. Jet/MSAccess database)
-  - added TOleDBJetConnectionProperties kind of connection to direct
-    access of Microsoft Jet databases (.mdb files)
-  - added corresponding IsJetFile() function
-  - added FieldSize optional parameter to TOleDBStatement.ColumnType()
-    method (used e.g. by SynDBVCL to provide the expected field size on TDataSet)
-  - added TOleDBConnectionProperties.CreateDatabase able to create a database
-    from the supplied connection string (used e.g. to initialize .mdb files)
-  - code refactoring, especially about error handling and ODBC integration
-  - CoInit and CoUninit made public for user convenience, e.g. when using
-    custom COM objects in a mORMot multi-thread servers
-
-  Version 1.18
-  - SQL statements with no results will now be cached to increase speed
-  - TOleDBMSSQLConnectionProperties provider changed to more stable SQLNCLI10
-  - added TOleDBMSSQL2005ConnectionProperties, TOleDBMSSQL2008ConnectionProperties
-    and TOleDBMSSQL2012ConnectionProperties classes to specify every available
-    MS SQL Server providers SQLNCLI, SQLNCLI10 or SQLNCLI11
-  - now trim any spaces when retrieving database schema text values
-  - added TOleDBStatement.UpdateCount overridden method (dc proposal)
-  - fixed ticket [4c68975022] about broken SQL statement when logging active
-  - fixed ticket [a24cbd30e3] about 64 bit compilation
-  - now works as expected under Win64 (a lot of previous code was Win32 specific)
-  - fixed issue when binding NULL parameters with some DB providers (e.g. Jet)
-  - fixed issue in TOleDBConnectionProperties.ColumnTypeNativeToDB() about
-    unrecognized column type when table schema is retrieved from SQL
-  - fixed issue when running TOleDBStatement.Step(true)
-  - fixed issue [e8c211062e] when binding NULL values in multi INSERT statements
-  - exception during Commit should leave transaction state - see [ca035b8f0da]
-  - fixed logging SQL content of external OleDB statements
-  - added TOleDBStatement.BindArray for `array of Int64` & `array of RawUFT8`
-    binding for `select` statements( via additional TABLE variable)
-  - added TOleDBInformixConnectionProperties - by EMartin
 }
 
 {$I Synopse.inc} // define HASINLINE CPU32 CPU64 OWNNORMTOUPPER
@@ -2009,9 +1952,10 @@ begin
         // 3.2 ExpectResults=false (e.g. SQL UPDATE) -> leave fRowSet=nil
         OleDBConnection.OleDBCheck(self,
           fCommand.Execute(nil,DB_NULLGUID,fDBParams,@fUpdateCount,nil));
-      with SynDBLog.Add do
-        if sllSQL in Family.Level then
-          Log(sllSQL,'% %',[Timer.Stop,SQLWithInlinedParams],self);
+      if SynDBLog<>nil then
+        with SynDBLog.Add do
+          if sllSQL in Family.Level then
+            Log(sllSQL,'% %',[Timer.Stop,SQLWithInlinedParams],self);
     finally
       for i := 0 to fParamCount - 1 do
         if Assigned(IDLists[i]) then begin
@@ -2344,7 +2288,8 @@ begin
     inherited Connect; // notify any re-connection
   except
     on E: Exception do begin
-      Log.Log(sllError,E);
+      if Log<>nil then
+        Log.Log(sllError,E);
       fSession := nil; // mark not connected
       fDBInitialize := nil;
       DataInitialize := nil;
@@ -2356,7 +2301,7 @@ end;
 constructor TOleDBConnection.Create(aProperties: TSQLDBConnectionProperties);
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Create'{$endif});
+  Log := SynDBLog.Enter(self,'Create');
   if not aProperties.InheritsFrom(TOleDBConnectionProperties) then
     raise EOleDBException.CreateUTF8('Invalid %.Create(%)',[self,aProperties]);
   fOleDBProperties := TOleDBConnectionProperties(aProperties);
@@ -2368,21 +2313,22 @@ end;
 destructor TOleDBConnection.Destroy;
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Destroy'{$endif});
+  Log := SynDBLog.Enter(self,'Destroy');
   try
     inherited Destroy; // call Disconnect;
     fMalloc := nil;
     CoUninit;
   except
     on E: Exception do
-      Log.Log(sllError,E);
+      if Log<>nil then
+        Log.Log(sllError,E);
   end;
 end;
 
 procedure TOleDBConnection.Disconnect;
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Disconnect'{$endif});
+  Log := SynDBLog.Enter(self,'Disconnect');
   try
     inherited Disconnect; // flush any cached statement
   finally
@@ -2476,7 +2422,7 @@ end;
 procedure TOleDBConnection.Commit;
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Commit'{$endif});
+  Log := SynDBLog.Enter(self,'Commit');
   if assigned(fTransaction) then begin
     inherited Commit;
     try
@@ -2491,7 +2437,7 @@ end;
 procedure TOleDBConnection.Rollback;
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Rollback'{$endif});
+  Log := SynDBLog.Enter(self,'Rollback');
   if assigned(fTransaction) then begin
     inherited Rollback;
     OleDbCheck(nil,fTransaction.Abort(nil,False,False));
@@ -2501,7 +2447,7 @@ end;
 procedure TOleDBConnection.StartTransaction;
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'StartTransaction'{$endif});
+  Log := SynDBLog.Enter(self,'StartTransaction');
   if assigned(fTransaction) then begin
     inherited StartTransaction;
     OleDbCheck(nil,fTransaction.StartTransaction(ISOLATIONLEVEL_READCOMMITTED,0,nil,nil));
@@ -2519,7 +2465,7 @@ var DataInitialize: IDataInitialize;
     tmp: PWideChar;
     Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'ConnectionStringDialog'{$endif});
+  Log := SynDBLog.Enter(self,'ConnectionStringDialog');
   result := false;
   if self<>nil then
   try
@@ -2541,11 +2487,13 @@ begin
         fConnectionString := tmp;
         if tmp<>nil then
           CoTaskMemFree(tmp);
-        Log.Log(sllDB,'New connection settings set',self);
+        if Log<>nil then
+          Log.Log(sllDB,'New connection settings set',self);
         result := true;
       end;
       DB_E_CANCELED:
-        Log.Log(sllDB,'Canceled',self);
+        if Log<>nil then
+          Log.Log(sllDB,'Canceled',self);
       else OleCheck(res);
       end;
     finally
@@ -2553,7 +2501,8 @@ begin
     end;
   except
     on E: Exception do
-      Log.Log(sllError,E);
+      if Log<>nil then
+        Log.Log(sllError,E);
   end;
 end;
 

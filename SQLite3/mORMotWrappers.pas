@@ -49,10 +49,6 @@ unit mORMotWrappers;
 
   ***** END LICENSE BLOCK *****
 
-
-  Version 1.18
-  - first public release, corresponding to Synopse mORMot Framework 1.18
-
 }
 
 {$I Synopse.inc} // define HASINLINE CPU32 CPU64 OWNNORMTOUPPER
@@ -65,6 +61,7 @@ uses
   Contnrs,
   Variants,
   SynCommons,
+  SynTable,
   mORMot,
   SynLZ,
   SynMustache;
@@ -584,22 +581,19 @@ begin
 end;
 
 constructor TWrapperContext.CreateFromUsedInterfaces(const aDescriptions: TFileName);
-var interfaces: TObjectList;
-    i: Integer;
+var interfaces: TSynObjectListLocked;
     services: TDocVariantData;
-    fact: TInterfaceFactory;
+    i: Integer;
 begin
   Create(aDescriptions);
   interfaces := TInterfaceFactory.GetUsedInterfaces;
   if interfaces=nil then
     exit;
   services.InitFast;
-  for i := 0 to interfaces.Count-1 do begin
-    fact := interfaces.List[i];
+  for i := 0 to interfaces.Count-1 do
     services.AddItem(_ObjFast([
-      'interfaceName',fact.InterfaceTypeInfo^.Name,
-      'methods',ContextFromMethods(fact)]));
-  end;
+      'interfaceName',TInterfaceFactory(interfaces.List[i]).InterfaceTypeInfo^.Name,
+      'methods',ContextFromMethods(interfaces.List[i])]));
   fSOA := _ObjFast(['enabled',True,'services',variant(services)]);
 end;
 
@@ -1433,7 +1427,7 @@ begin
       inc(i, 3);
     end;
     pas := TSynMustache.Parse(Template).Render(context, nil, TSynMustache.HelpersGetStandardList);
-    result := StringReplaceAll(StringReplaceAll(pas, '();', ';'), '():', ':');
+    result := StringReplaceAll(pas, ['();', ';', '():', ':']);
 //FileFromString(_Safe(context)^.ToJSON('','',jsonUnquotedPropName),FileName+'.json');
   finally
     server.Free;
@@ -1518,8 +1512,7 @@ begin
         TextColor(ccBrown);
     end
     else begin
-      line := StringReplaceAll(StringReplaceAll(StringReplaceAll(
-        line, '`', ''),'<<', ''), '>>', '');
+      line := StringReplaceAll(line, ['`','', '<<','', '>>','']);
       i := 1;
       repeat
         j := PosEx('[', line, i);

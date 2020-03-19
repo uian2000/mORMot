@@ -44,9 +44,6 @@ unit SynDBRemote;
 
   ***** END LICENSE BLOCK *****
 
-  Version 1.18
-  - first public release, corresponding to mORMot Framework 1.18
-
 }
 
 {$I Synopse.inc} // define HASINLINE CPU32 CPU64 OWNNORMTOUPPER
@@ -432,7 +429,7 @@ begin
   inDataType := DataType;
   result := fClient.Request(fDatabaseName,'POST',fKeepAliveMS,'',inData,inDataType,
     SockString(head),SockString(Data));
-  DataType := FindIniNameValue(pointer(head),HEADER_CONTENT_TYPE_UPPER)
+  FindNameValue(head,HEADER_CONTENT_TYPE_UPPER,RawUTF8(DataType));
 end;
 
 

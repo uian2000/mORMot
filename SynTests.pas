@@ -44,17 +44,6 @@ unit SynTests;
 
   ***** END LICENSE BLOCK *****
 
-  Version 1.18
-  - first public release, extracted from SynCommons.pas unit
-  - added class function TSynTestCase.RandomTextParagraph
-  - TSynTests will now write the tests summary with colored console output
-  - added TSynTestCase.CleanUp virtual method for proper cleaning before Destroy
-  - added TSynTestCase.CheckMatchAny() method for multi-value checks
-  - TSynTestCase.TestFailed now triggers a debugger breakpoint when run from IDE
-  - added TSynTestCase.NotifyTestSpeed() method
-  - extraction of TTestLowLevelCommon code into SynSelfTests.pas unit
-  - added TSynTests.RunAsConsole() class method to ease console test app writing
-
 *)
 
 
@@ -83,6 +72,7 @@ uses
 {$endif}
   SynLZ, // needed e.g. for TSynMapFile .mab format
   SynCommons,
+  SynTable,
   SynLog,
   SysUtils;
 
@@ -293,7 +283,10 @@ type
     // - OnlyLog will compute and append the info to the log, but not on the console
     // - warning: this method is not thread-safe if a local Timer is not specified
     function NotifyTestSpeed(const ItemName: string; ItemCount: integer;
-      SizeInBytes: cardinal=0; Timer: PPrecisionTimer=nil; OnlyLog: boolean=false): TSynMonitorOneMicroSec;
+      SizeInBytes: cardinal=0; Timer: PPrecisionTimer=nil; OnlyLog: boolean=false): TSynMonitorOneMicroSec; overload;
+    /// will add to the console a formatted message with a speed estimation
+    function NotifyTestSpeed(const ItemNameFmt: RawUTF8; const ItemNameArgs: array of const;
+      ItemCount: integer; SizeInBytes: cardinal=0; Timer: PPrecisionTimer=nil; OnlyLog: boolean=false): TSynMonitorOneMicroSec; overload;
     /// append some text to the current console
     // - OnlyLog will compute and append the info to the log, but not on the console
     procedure AddConsole(const msg: string; OnlyLog: boolean=false);
@@ -333,7 +326,7 @@ type
     // it is an index to the corresponding published method, and the Strings[]
     // contains the associated failure message
     fFailed: TStringList;
-    fTestCase: TObjectList;
+    fTestCase: TSynObjectList;
     fAssertions: integer;
     fAssertionsFailed: integer;
     fCurrentMethod, fCurrentMethodIndex: integer;
@@ -686,9 +679,10 @@ end;
 
 procedure TSynTestCase.CheckUTF8(condition: Boolean; const msg: RawUTF8;
   const args: array of const);
-  procedure SubProcForMessage;
-  var str: string;
-  begin
+var str: string; // using a sub-proc may be faster, but unstable on Android
+begin
+  InterlockedIncrement(fAssertions);
+  if not condition or (tcoLogEachCheck in fOptions) then begin
     if msg<>'' then begin
       FormatString(msg,args,str);
       if tcoLogEachCheck in fOptions then
@@ -697,10 +691,6 @@ procedure TSynTestCase.CheckUTF8(condition: Boolean; const msg: RawUTF8;
     if not condition then
       TestFailed(str);
   end;
-begin
-  InterlockedIncrement(fAssertions);
-  if not condition or (tcoLogEachCheck in fOptions) then
-    SubProcForMessage;
 end;
 
 procedure TSynTestCase.CheckLogTimeStart;
@@ -916,6 +906,14 @@ begin
   result := Temp.TimeInMicroSec;
 end;
 
+function TSynTestCase.NotifyTestSpeed(const ItemNameFmt: RawUTF8; const ItemNameArgs: array of const;
+  ItemCount: integer; SizeInBytes: cardinal; Timer: PPrecisionTimer; OnlyLog: boolean): TSynMonitorOneMicroSec;
+var str: string;
+begin
+  FormatString(ItemNameFmt,ItemNameArgs,str);
+  result := NotifyTestSpeed(str,ItemCount,SizeInBytes,Timer,OnlyLog);
+end;
+
 
 { TSynTests }
 
@@ -947,7 +945,7 @@ constructor TSynTests.Create(const Ident: string);
 begin
   inherited Create(Ident);
   fFailed := TStringList.Create;
-  fTestCase := TObjectList.Create;
+  fTestCase := TSynObjectList.Create;
   fSafe.Init;
 end;
 

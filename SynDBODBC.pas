@@ -47,37 +47,6 @@ unit SynDBODBC;
 
   ***** END LICENSE BLOCK *****
 
-  Version 1.16
-  - first public release, corresponding to mORMot Framework 1.16
-
-  Version 1.17
-  - initial working code, tested with ODBC Oracle provider
-
-  Version 1.18
-  - huge performance boost due to SQL statement cache implementation
-  - added FireBird ODBC driver detection
-  - circumvent restriction of some non-Unicode ODBC drivers to use SQL_C_CHAR
-    parameter binding instead of SQL_C_WCHAR (e.g. Microsoft Oracle ODBC)
-  - circumvent restring of some drivers which expect SQLExpect() columns to be
-    retrieved in left-to-right order
-  - fixed unexpected exception raised if SQL_NO_DATA is returned
-  - fixed issue when binding parameters: now specifies the correct SQL data type
-  - now trim any spaces when retrieving database schema text values
-  - fixed ticket [4c68975022] about broken SQL statement when logging active
-  - fixed ticket [d48283f5ec] about error at binding void string parameter
-  - exception during Commit should leave transaction state - see [ca035b8f0da]
-  - GetCol() will now retrieve all columns at once - mandatory for drivers not
-    supporting SQL_GD_ANY_ORDER feature (like SQL Server Native Client 10.0)
-  - TODBCConnectionProperties.Create will now handle full ODBC connection string
-    in aDatabaseName instead of ODBC Data Source name in aServerName
-  - now TODBCConnection.Connect() will recognize the DBMS from its driver name
-  - added NexusDB, Firebird, SQlite3 and DB2 support
-  - added Informix support - by EMartin
-  - added GetProcedureNames for listing stored procedure names from current connection
-  - addes GetViewNames and SQLGetViewNames for listing view names from current connection
-  - added ODBCInstalledDriversList for listing installed ODBC drivers (Windows only)
-  - overrided GetDatabaseNameSafe over ODBC connection string
-
   TODO:
   - implement array binding of parameters
     http://msdn.microsoft.com/en-us/library/windows/desktop/ms709287
@@ -734,7 +703,8 @@ type
 
   {$A-}
   /// memory structure used to store SQL_C_TYPE_TIMESTAMP values
-  {$ifdef UNICODE}SQL_TIMESTAMP_STRUCT = record{$else}SQL_TIMESTAMP_STRUCT = object{$endif}
+  {$ifdef USERECORDWITHMETHODS}SQL_TIMESTAMP_STRUCT = record
+    {$else}SQL_TIMESTAMP_STRUCT = object{$endif}
     Year:     SqlSmallint;
     Month:    SqlUSmallint;
     Day:      SqlUSmallint;
@@ -1208,13 +1178,15 @@ begin
       raise EODBCException.CreateUTF8(
         '%.Connect: unrecognized provider DBMSName=% DriverName=% DBMSVersion=%',
         [self,DBMSName,DriverName,DBMSVersion]);
-    Log.Log(sllDebug,'Connected to % using % % recognized as %',
-      [DBMSName,DriverName,DBMSVersion,fProperties.DBMSEngineName]);
+    if Log<>nil then
+      Log.Log(sllDebug,'Connected to % using % % recognized as %',
+        [DBMSName,DriverName,DBMSVersion,fProperties.DBMSEngineName]);
     // notify any re-connection
     inherited Connect;
   except
     on E: Exception do begin
-      Log.Log(sllError,E);
+      if Log<>nil then
+        Log.Log(sllError,E);
       self.Disconnect; // clean up on fail
       raise;
     end;
@@ -1224,7 +1196,7 @@ end;
 constructor TODBCConnection.Create(aProperties: TSQLDBConnectionProperties);
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Create'{$endif});
+  Log := SynDBLog.Enter(self,'Create');
   if not aProperties.InheritsFrom(TODBCConnectionProperties) then
     raise EODBCException.CreateUTF8('Invalid %.Create(%)',[self,aProperties]);
   fODBCProperties := TODBCConnectionProperties(aProperties);
@@ -1246,7 +1218,7 @@ begin
   finally
     if (ODBC<>nil) and (fDbc<>nil) then
     with ODBC do begin
-      log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Disconnect'{$endif});
+      log := SynDBLog.Enter(self,'Disconnect');
       Disconnect(fDbc);
       FreeHandle(SQL_HANDLE_DBC,fDbc);
       fDbc := nil;
@@ -1683,6 +1655,7 @@ var p, k: integer;
       StrLen_or_Ind: array of PtrInt;
       WData: RawUnicode;
     end;
+    log: ISynLog;
 label retry;
 begin
   if fStatement=nil then
@@ -1690,9 +1663,12 @@ begin
   inherited ExecutePrepared; // set fConnection.fLastAccessTicks
   DriverDoesNotHandleUnicode := TODBCConnection(fConnection).fODBCProperties.fDriverDoesNotHandleUnicode;
   if fSQL<>'' then
-    with SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'ExecutePrepared'{$endif}).Instance do
-      if sllSQL in Family.Level then
-        Log(sllSQL,SQLWithInlinedParams,self,2048);
+  begin
+    log := SynDBLog.Enter(self,'ExecutePrepared');
+    if log <> nil then
+      if sllSQL in log.Instance.Family.Level then
+        log.Log(sllSQL,SQLWithInlinedParams,self,2048);
+  end;
   try
     // 1. bind parameters
     if (fParamsArrayCount>0) and (fDBMS<>dMSSQL) then
@@ -1880,7 +1856,7 @@ end;
 procedure TODBCStatement.Prepare(const aSQL: RawUTF8; ExpectResults: Boolean);
 var Log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self{$ifndef DELPHI5OROLDER},'Prepare'{$endif});
+  Log := SynDBLog.Enter(self,'Prepare');
   if (fStatement<>nil) or (fColumnCount>0) then
     raise EODBCException.CreateUTF8('%.Prepare should be called only once',[self]);
   // 1. process SQL
@@ -1893,7 +1869,8 @@ begin
       SQL_HANDLE_STMT,fStatement);
   except
     on E: Exception do begin
-      Log.Log(sllError,E);
+      if Log<>nil then
+        Log.Log(sllError,E);
       ODBC.FreeHandle(SQL_HANDLE_STMT,fStatement);
       fStatement := nil;
       raise;

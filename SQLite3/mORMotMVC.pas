@@ -45,11 +45,6 @@ unit mORMotMVC;
 
   ***** END LICENSE BLOCK *****
 
-
-  Version 1.18
-  - first public release, corresponding to mORMot Framework 1.18
-    and feature request [bd94c11ab1]
-
 }
 
 {$I Synopse.inc} // define HASINLINE CPU32 CPU64 OWNNORMTOUPPER
@@ -2043,7 +2038,7 @@ end;
 function TMVCRendererReturningData.Redirects(const action: TMVCAction): boolean;
 begin
   fOutput.Header := 'Location: '+UrlEncodeJsonObject(action.RedirectToMethodName,
-    pointer(action.RedirectToMethodParameters),['main']);
+    action.RedirectToMethodParameters,['main']);
   fOutput.Status := action.ReturnedStatus;
   result := true;
 end;
