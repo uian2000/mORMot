@@ -1071,7 +1071,7 @@ type
     // once it has been upgraded to WebSockets
     constructor Create(const aPort: SockString; OnStart,OnStop: TNotifyThreadEvent;
       const ProcessName: SockString; ServerThreadPoolCount: integer=2;
-      KeepAliveTimeOut: integer=30000); override;
+      KeepAliveTimeOut: integer=30000; HeadersNotFiltered: boolean=false); override;
     /// close the server
     destructor Destroy; override;
     /// will send a given frame to all connected clients
@@ -1118,6 +1118,8 @@ type
     // use AES-CFB 256 bits encryption
     // - if aWebSocketsAJAX is TRUE, it will also register TWebSocketProtocolJSON
     // so that AJAX applications would be able to connect to this server
+    // - warning: WaitStarted should be called after Create() to check for
+    // for actual port binding in the background thread
     constructor Create(const aPort: SockString; OnStart,OnStop: TNotifyThreadEvent;
       const aProcessName, aWebSocketsURI, aWebSocketsEncryptionKey: RawUTF8;
       aWebSocketsAJAX: boolean=false); reintroduce; overload;
@@ -3147,7 +3149,8 @@ end;
 { TWebSocketServer }
 
 constructor TWebSocketServer.Create(const aPort: SockString; OnStart,OnStop: TNotifyThreadEvent;
-  const ProcessName: SockString; ServerThreadPoolCount, KeepAliveTimeOut: integer);
+  const ProcessName: SockString; ServerThreadPoolCount, KeepAliveTimeOut: integer;
+  HeadersNotFiltered: boolean);
 begin
   // override with custom processing classes
   fSocketClass := TWebSocketServerSocket;
@@ -3159,7 +3162,8 @@ begin
   fSettings.HeartbeatDelay := 20000;
   fCanNotifyCallback := true;
   // start the server
-  inherited Create(aPort,OnStart,OnStop,ProcessName,ServerThreadPoolCount,KeepAliveTimeOut);
+  inherited Create(aPort,OnStart,OnStop,ProcessName,ServerThreadPoolCount,
+    KeepAliveTimeOut,HeadersNotFiltered);
 end;
 
 function TWebSocketServer.WebSocketProcessUpgrade(ClientSock: THttpServerSocket;
@@ -3483,7 +3487,7 @@ begin
           block := wscNonBlockWithoutAnswer else
           block := wscBlockWithAnswer;
         result := fProcess.NotifyCallback(Ctxt,block);
-        if IdemPChar(pointer(Ctxt.OutContentType), JSON_CONTENT_TYPE_UPPER) then
+        if IdemPChar(pointer(Ctxt.OutContentType),JSON_CONTENT_TYPE_UPPER) then
           HeaderSetText(Ctxt.OutCustomHeaders) else
           HeaderSetText(Ctxt.OutCustomHeaders,Ctxt.OutContentType);
         Content := Ctxt.OutContent;
@@ -3551,7 +3555,7 @@ begin
       SockSend; // CRLF
       SockSendFlush('');
       SockRecvLn(cmd);
-      GetHeader;
+      GetHeader(false);
       prot := HeaderGetValue('SEC-WEBSOCKET-PROTOCOL');
       result := 'Invalid HTTP Upgrade Header';
       if not IdemPChar(pointer(cmd),'HTTP/1.1 101') or
@@ -3766,7 +3770,7 @@ constructor TAsynchConnectionsThread.Create(aOwner: TAsynchConnections;
 begin
   fOwner := aOwner;
   fProcess := aProcess;
-  fOnTerminate := fOwner.fOnTerminate;
+  fOnThreadTerminate := fOwner.fOnThreadTerminate;
   inherited Create(false);
 end;
 

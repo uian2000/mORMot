@@ -96,12 +96,10 @@ type
     /// initialize access to a SQLite3 engine with some properties
     // - only used parameter is aServerName, which should point to the SQLite3
     // database file to be opened (one will be created if none exists)
-    // - you can specify an optional password, which will be used to access
-    // the database via some custom kind of encryption - not compatible with the
-    // official SQLite Encryption Extension module - see
-    // @http://www.hwaci.com/sw/sqlite/see.html (beta feature - better not to
-    // be used on production - in which the default encryption level is
-    // very low)
+    // - if specified, the password will be used to cypher this file on disk
+    // (the main SQLite3 database file is encrypted, not the wal file during run);
+    // the password may be a JSON-serialized TSynSignerParams object, or will use
+    // AES-OFB-128 after SHAKE_128 with rounds=1000 and a fixed salt on plain password text
     // - other parameters (DataBaseName, UserID) are ignored
     constructor Create(const aServerName, aDatabaseName, aUserID, aPassWord: RawUTF8); overload; override;
     /// initialize access to an existing SQLite3 engine
@@ -180,12 +178,12 @@ type
   TSQLDBSQLite3Statement = class(TSQLDBStatement)
   protected
     fStatement: TSQLRequest;
-    fShouldLogSQL: boolean; // sllSQL in SynDBLog.Family.Level
-    fBindValues: TRawUTF8DynArray;
-    fBindIsString: TByteDynArray;
+    fShouldLogSQL: boolean; // sllSQL in SynDBLog.Level -> set fLogSQLValues[]
+    fLogSQLValues: TVariantDynArray;
     fUpdateCount: integer;
     // retrieve the inlined value of a given parameter, e.g. 1 or 'name'
-    function GetParamValueAsText(Param: integer; MaxCharCount: integer=4096): RawUTF8; override;
+    procedure AddParamValueAsText(Param: integer; Dest: TTextWriter;
+      MaxCharCount: integer); override;
   public
     /// create a SQLite3 statement instance, from an existing SQLite3 connection
     // - the Execute method can be called once per TSQLDBSQLite3Statement instance,
@@ -265,6 +263,8 @@ type
     // otherwise, it will fetch one row of data, to be called within a loop
     // - raise an ESQLite3Exception exception on any error
     function Step(SeekFirst: boolean=false): boolean; override;
+    /// finalize the cursor
+    procedure ReleaseRows; override;
     /// retrieve a column name of the current Row
     // - Columns numeration (i.e. Col value) starts with 0
     // - it's up to the implementation to ensure than all column names are unique
@@ -482,40 +482,40 @@ end;
 procedure TSQLDBSQLite3Statement.Bind(Param: Integer; Value: double;
   IO: TSQLDBParamInOutType);
 begin
-  if fShouldLogSQL and (cardinal(Param-1)<cardinal(fParamCount)) then
-    ExtendedToStr(Value,DOUBLE_PRECISION,fBindValues[Param-1]);
+  if fShouldLogSQL and (cardinal(Param-1)<cardinal(length(fLogSQLValues))) then
+    fLogSQLValues[Param-1] := Value;
   fStatement.Bind(Param,Value);
 end;
 
 procedure TSQLDBSQLite3Statement.Bind(Param: Integer; Value: Int64;
   IO: TSQLDBParamInOutType);
 begin
-  if fShouldLogSQL and (cardinal(Param-1)<cardinal(fParamCount)) then
-    fBindValues[Param-1] := Int64ToUtf8(Value);
+  if fShouldLogSQL and (cardinal(Param-1)<cardinal(length(fLogSQLValues))) then
+    fLogSQLValues[Param-1] := Value;
   fStatement.Bind(Param,Value);
 end;
 
 procedure TSQLDBSQLite3Statement.BindBlob(Param: Integer; Data: pointer;
   Size: integer; IO: TSQLDBParamInOutType);
 begin
-  if fShouldLogSQL and (cardinal(Param-1)<cardinal(fParamCount)) then
-    fBindValues[Param-1] := '*BLOB*';
+  if fShouldLogSQL and (cardinal(Param-1)<cardinal(length(fLogSQLValues))) then
+    fLogSQLValues[Param-1] := Size;
   fStatement.Bind(Param,Data,Size);
 end;
 
 procedure TSQLDBSQLite3Statement.BindBlob(Param: Integer;
   const Data: RawByteString; IO: TSQLDBParamInOutType);
 begin
-  if fShouldLogSQL and (cardinal(Param-1)<cardinal(fParamCount)) then
-    fBindValues[Param-1] := '*BLOB*';
+  if fShouldLogSQL and (cardinal(Param-1)<cardinal(length(fLogSQLValues))) then
+    fLogSQLValues[Param-1] := length(Data);
   fStatement.BindBlob(Param,Data);
 end;
 
 procedure TSQLDBSQLite3Statement.BindCurrency(Param: Integer;
   Value: currency; IO: TSQLDBParamInOutType);
 begin
-  if fShouldLogSQL and (cardinal(Param-1)<cardinal(fParamCount)) then
-    fBindValues[Param-1] := Curr64ToStr(PInt64(@Value)^);
+  if fShouldLogSQL and (cardinal(Param-1)<cardinal(length(fLogSQLValues))) then
+    fLogSQLValues[Param-1] := Value;
   fStatement.Bind(Param,Value);
 end;
 
@@ -528,8 +528,6 @@ end;
 procedure TSQLDBSQLite3Statement.BindNull(Param: Integer;
   IO: TSQLDBParamInOutType; BoundType: TSQLDBFieldType);
 begin
-  if fShouldLogSQL and (cardinal(Param-1)<cardinal(fParamCount)) then
-    fBindValues[Param-1] := 'NULL';
   fStatement.BindNull(Param);
 end;
 
@@ -540,7 +538,7 @@ procedure TSQLDBSQLite3Statement.BindTextP(Param: Integer;
   Value: PUTF8Char; IO: TSQLDBParamInOutType);
 var V: RawUTF8;
 begin
-  SetString(V,PAnsiChar(Value),StrLen(Value));
+  FastSetString(V,Value,StrLen(Value));
   BindTextU(Param,V);
 end;
 
@@ -553,10 +551,8 @@ end;
 procedure TSQLDBSQLite3Statement.BindTextU(Param: Integer;
   const Value: RawUTF8; IO: TSQLDBParamInOutType);
 begin
-  if fShouldLogSQL and (cardinal(Param-1)<cardinal(fParamCount)) then begin
-    fBindValues[Param-1] := Value;
-    SetBit(pointer(fBindIsString)^,Param-1);
-  end;
+  if fShouldLogSQL and (cardinal(Param-1)<cardinal(length(fLogSQLValues))) then
+    RawUTF8ToVariant(Value,fLogSQLValues[Param-1]);
   fStatement.Bind(Param,Value);
 end;
 
@@ -658,40 +654,22 @@ begin
 end;
 
 procedure TSQLDBSQLite3Statement.ExecutePrepared;
-var SQLToBeLogged: RawUTF8;
-    Timer: TPrecisionTimer;
-    DB: TSQLDataBase;
-    log: TSynLog;
+var DB: TSQLDataBase;
 begin
   fCurrentRow := 0; // mark cursor on the first row
   inherited ExecutePrepared; // set fConnection.fLastAccessTicks
-  if fShouldLogSQL then begin
-    log := SynDBLog.Add;
-    SQLToBeLogged := SQLWithInlinedParams;
-  end else
-    log := nil;
   DB := TSQLDBSQLite3Connection(Connection).DB;
-  if fExpectResults then begin
-    // not executed here, but in TSQLDBSQLite3Statement.Step method
-    if log<>nil then
-      log.Log(sllSQL,'% %',[DB.FileNameWithoutPath,SQLToBeLogged],self);
-    exit;
-  end;
+  if fExpectResults then
+    exit; // execution done in Step()
+  if fShouldLogSQL then
+    SQLLogBegin(sllSQL);
   try  // INSERT/UPDATE/DELETE (i.e. not SELECT) -> try to execute directly now
-    if log<>nil then
-      Timer.Start;
     repeat // Execute all steps of the first statement
     until fStatement.Step<>SQLITE_ROW;
-    if log<>nil then
-      log.Log(sllSQL,'% % %',[Timer.Stop,DB.FileNameWithoutPath,SQLToBeLogged],self);
     fUpdateCount := DB.LastChangeCount;
-  except
-    on E: Exception do begin
-      if log<>nil then
-        log.Log(sllSQL,'Error % on % for [%] as [%]',
-          [E,DB.FileNameWithoutPath,SQL,SQLToBeLogged],self);
-      raise;
-    end;
+  finally
+    if fShouldLogSQL then
+      SQLLogEnd;
   end;
 end;
 
@@ -700,44 +678,48 @@ begin
   result := fUpdateCount;
 end;
 
-function TSQLDBSQLite3Statement.GetParamValueAsText(Param: integer; MaxCharCount: integer=4096): RawUTF8;
+procedure TSQLDBSQLite3Statement.AddParamValueAsText(Param: integer;
+  Dest: TTextWriter; MaxCharCount: integer);
+var v: PVarData;
 begin
   dec(Param);
-  if not fShouldLogSQL or (cardinal(Param)>=cardinal(fParamCount)) then
-    result := '' else begin
-    if length(result)>MaxCharCount Then
-      result := copy(fBindValues[Param],1,MaxCharCount) else
-      result := fBindValues[Param];
-    if GetBitPtr(pointer(fBindIsString),Param) then
-      result := QuotedStr(result);
+  if fShouldLogSQL and (cardinal(Param)<cardinal(length(fLogSQLValues))) then begin
+    v := @fLogSQLValues[Param];
+    if v^.vtype=varString then
+      Dest.AddQuotedStr(v^.VAny,'''',MaxCharCount) else
+      Dest.AddVariant(PVariant(v)^);
   end;
 end;
 
 procedure TSQLDBSQLite3Statement.Prepare(const aSQL: RawUTF8;
   ExpectResults: Boolean);
-var Timer: TPrecisionTimer;
 begin
   if fShouldLogSQL then
-    Timer.Start;
+    SQLLogBegin(sllDB);
   inherited Prepare(aSQL,ExpectResults); // set fSQL + Connect if necessary
   fStatement.Prepare(TSQLDBSQLite3Connection(Connection).fDB.DB,aSQL);
   fColumnCount := fStatement.FieldCount;
   if fShouldLogSQL then begin
     fParamCount := fStatement.ParamCount;
-    SetLength(fBindValues,fParamCount);
-    SetLength(fBindIsString,(fParamCount shr 3)+1);
+    SetLength(fLogSQLValues,fParamCount);
+    SQLLogEnd(' %',[TSQLDBSQLite3Connection(Connection).fDB.FileNameWithoutPath]);
   end;
-  if fShouldLogSQL and (PosEx('?',SQL)>0) then
-    SynDBLog.Add.Log(sllDB,'Prepare % % %',[Timer.Stop,
-      TSQLDBSQLite3Connection(Connection).DB.FileNameWithoutPath,SQL],self);
 end;
 
 procedure TSQLDBSQLite3Statement.Reset;
 begin
-  inherited Reset;
   fStatement.Reset;
   fUpdateCount := 0;
   // fStatement.BindReset; // slow down the process, and is not mandatory
+  ReleaseRows;
+  SetLength(fLogSQLValues,fParamCount);
+  inherited Reset;
+end;
+
+procedure TSQLDBSQLite3Statement.ReleaseRows;
+begin
+  VariantDynArrayClear(fLogSQLValues);
+  inherited ReleaseRows;
 end;
 
 function TSQLDBSQLite3Statement.Step(SeekFirst: boolean): boolean;
@@ -755,7 +737,7 @@ begin
       if fShouldLogSQL then
         SynDBLog.Add.Log(sllError,'Error % on % for [%] as [%]',
           [E,TSQLDBSQLite3Connection(Connection).DB.FileNameWithoutPath,SQL,
-          SQLWithInlinedParams],self);
+           SQLWithInlinedParams],self);
       raise;
     end;
   end;
