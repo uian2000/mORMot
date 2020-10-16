@@ -179,10 +179,16 @@ type
     function FindLocation(aAddressAbsolute: PtrUInt): RawUTF8; overload;
     /// return the symbol location according to the supplied ESynException
     // - i.e. unit name, symbol name and line number (if any), as plain text
+    // - under FPC, currently calls BacktraceStrFunc() which may be very slow
     class function FindLocation(exc: ESynException): RawUTF8; overload;
+    /// return the low-level stack trace exception information into human-friendly text
+    class function FindStackTrace(const Ctxt: TSynLogExceptionContext): TRawUTF8DynArray;
     /// returns the file name of
     // - if unitname = '', returns the main file name of the current executable
     class function FindFileName(const unitname: RawUTF8): TFileName;
+    /// returns the global TSynMapFile instance associated with the current
+    // executable
+    class function FromCurrentExecutable: TSynMapFile;
     /// all symbols associated to the executable
     property Symbols: TSynMapSymbolDynArray read fSymbol;
     /// all units, including line numbers, associated to the executable
@@ -459,6 +465,7 @@ type
     fExceptionIgnore: TList;
     fOnBeforeException: TSynLogOnBeforeException;
     fEchoToConsole: TSynLogInfos;
+    fEchoToConsoleUseJournal: boolean;
     fEchoCustom: TOnTextWriterEcho;
     fEchoRemoteClient: TObject;
     fEchoRemoteClientOwned: boolean;
@@ -469,12 +476,14 @@ type
     fRotateFileCount: cardinal;
     fRotateFileSize: cardinal;
     fRotateFileAtHour: integer;
+    fRotateFileNoCompression: boolean;
     function CreateSynLog: TSynLog;
     procedure StartAutoFlush;
     procedure SetDestinationPath(const value: TFileName);
     procedure SetLevel(aLevel: TSynLogInfos);
     procedure SynLogFileListEcho(const aEvent: TOnTextWriterEcho; aEventAdd: boolean);
     procedure SetEchoToConsole(aEnabled: TSynLogInfos);
+    procedure SetEchoToConsoleUseJournal(aValue: boolean);
     procedure SetEchoCustom(const aEvent: TOnTextWriterEcho);
     function GetSynLogClassName: string;
     function GetExceptionIgnoreCurrentThread: boolean;
@@ -565,6 +574,14 @@ type
     // - can be set e.g. to LOG_VERBOSE in order to echo every kind of events
     // - EchoCustom or EchoToConsole can be activated separately
     property EchoToConsole: TSynLogInfos read fEchoToConsole write SetEchoToConsole;
+    /// For Linux with journald
+    // - if true: redirect all EchoToConsole logging into journald service
+    // - such logs can be exported into a format whichcan be viewed by our
+    // LogView tool using a command (replacing UNIT with your unit name and
+    // PROCESS with the executable name):
+    // $ "journalctl -u UNIT --no-hostname -o short-iso-precise --since today | grep "PROCESS\[.*\]:  . " > todaysLog.log"
+    property EchoToConsoleUseJournal: boolean read fEchoToConsoleUseJournal
+      write SetEchoToConsoleUseJournal;
     /// can be set to a callback which will be called for each log line
     // - could be used with a third-party logging system
     // - EchoToConsole or EchoCustom can be activated separately
@@ -684,6 +701,8 @@ type
     // specified hour
     // - is not used if RotateFileCount is left to its default 0
     property RotateFileDailyAtHour: integer read fRotateFileAtHour write fRotateFileAtHour;
+    /// if set to TRUE, no #.synlz will be created at rotation but plain #.log file
+    property RotateFileNoCompression: boolean read fRotateFileNoCompression write fRotateFileNoCompression;
     /// the recursive depth of stack trace symbol to write
     // - used only if exceptions are handled, or by sllStackTrace level
     // - default value is 30, maximum is 255
@@ -1164,6 +1183,7 @@ type
     fLogProcSortInternalOrder: TLogProcSortOrder;
     /// used by ProcessOneLine//GetLogLevelTextMap
     fLogLevelsTextMap: array[TSynLogInfo] of cardinal;
+    fIsJournald: boolean;
     procedure SetLogProcMerged(const Value: boolean);
     function GetEventText(index: integer): RawUTF8;
     function GetLogLevelFromText(LineBeg: PUTF8Char): TSynLogInfo;
@@ -1540,7 +1560,6 @@ function GetLastExceptions(Depth: integer=0): variant; overload;
 
 /// convert low-level exception information into some human-friendly text
 function ToText(var info: TSynLogExceptionInfo): RawUTF8; overload;
-
 
 /// a TSynLogArchiveEvent handler which will delete older .log files
 function EventArchiveDelete(const aOldLogFileName, aDestinationPath: TFileName): boolean;
@@ -2257,14 +2276,20 @@ begin
     PointerToHex(pointer(aAddressAbsolute),result);
     exit;
   end;
-  result := '';
   offset := AbsoluteToOffset(aAddressAbsolute);
   s := FindSymbol(offset);
   u := FindUnit(offset,Line);
-  if (s<0) and (u<0) then
+  if (s<0) and (u<0) then begin
+    {$ifdef FPC} // note: BackTraceStrFunc is much slower than TSynMapFile.Log
+    if @BackTraceStrFunc=@SysBackTraceStr then // has debug information?
+      PointerToHex(pointer(aAddressAbsolute),result) else
+      ShortStringToAnsi7String(BackTraceStrFunc(pointer(aAddressAbsolute)),result);
+    {$endif FPC}
     exit;
+  end;
+  result := result+' ';
   if u>=0 then begin
-    result := Units[u].Symbol.Name;
+    result := result+Units[u].Symbol.Name;
     if s>=0 then
       if Symbols[s].Name=result then
         s := -1 else
@@ -2281,6 +2306,19 @@ begin
   if (exc=nil) or (exc.RaisedAt=nil) then
     result := '' else
     result := GetInstanceMapFile.FindLocation(PtrUInt(exc.RaisedAt));
+end;
+
+class function TSynMapFile.FindStackTrace(
+  const Ctxt: TSynLogExceptionContext): TRawUTF8DynArray;
+var i: PtrInt;
+    exe: TSynMapFile;
+begin
+  result := nil;
+  exe := GetInstanceMapFile;
+  AddRawUTF8(result,exe.FindLocation(Ctxt.EAddr));
+  for i := 0 to Ctxt.EStackCount-1 do
+    if (i=0) or (PPtrUIntArray(Ctxt.EStack)[i]<>PPtrUIntArray(Ctxt.EStack)[i-1]) then
+      AddRawUTF8(result,exe.FindLocation(PPtrUIntArray(Ctxt.EStack)[i]));
 end;
 
 function TSynMapFile.FindUnit(const aUnitName: RawUTF8): integer;
@@ -2307,6 +2345,11 @@ begin
   u := map.FindUnit(name);
   if u>=0 then
     result := UTF8ToString(map.fUnit[u].FileName);
+end;
+
+class function TSynMapFile.FromCurrentExecutable: TSynMapFile;
+begin
+  result := GetInstanceMapFile;
 end;
 
 
@@ -2670,7 +2713,7 @@ begin
          DefaultSynLogExceptionToStr(log.fWriter,Ctxt) then
         goto fin;
 adr:  log.fWriter.Add(' [%] at ',[log.fThreadContext^.ThreadName],twOnSameLine);
-      {$ifdef FPC} // note: BackTraceStrFunc is slower than TSynMapFile.Log
+      {$ifdef FPC} // note: BackTraceStrFunc is much slower than TSynMapFile.Log
       with log.fWriter do
       if @BackTraceStrFunc=@SysBackTraceStr then begin // no debug information
         AddPointer(Ctxt.EAddr); // write addresses as hexa
@@ -3159,6 +3202,16 @@ begin
   fEchoToConsole := aEnabled;
 end;
 
+procedure TSynLogFamily.SetEchoToConsoleUseJournal(aValue: boolean);
+begin
+  if self<>nil then
+    {$ifdef LINUXNOTBSD}
+    if aValue and SystemdIsAvailable then
+      fEchoToConsoleUseJournal := true else
+    {$endif}
+      fEchoToConsoleUseJournal := false;
+end;
+
 function TSynLogFamily.GetSynLogClassName: string;
 begin
   if self=nil then
@@ -3252,7 +3305,6 @@ var
 
 constructor TAutoFlushThread.Create;
 begin
-  FreeOnTerminate := true;
   fEvent := TEvent.Create(nil,false,false,'');
   inherited Create(false);
 end;
@@ -3336,11 +3388,13 @@ begin
   fDestroying := true;
   EchoRemoteStop;
   if AutoFlushThread<>nil then begin
-    {$ifndef AUTOFLUSHRAWWIN}
+    {$ifdef AUTOFLUSHRAWWIN}
+    AutoFlushThread := nil; // Terminated=true to avoid GPF in AutoFlushProc
+    {$else}
     AutoFlushThread.Terminate;
     AutoFlushThread.fEvent.SetEvent; // notify TAutoFlushThread.Execute
+    FreeAndNil(AutoFlushThread); // wait for the TThread to be terminated
     {$endif}
-    AutoFlushThread := nil; // Terminated=true to avoid GPF in AutoFlushProc
   end;
   ExceptionIgnore.Free;
   try
@@ -4063,10 +4117,30 @@ function TSynLog.ConsoleEcho(Sender: TTextWriter; Level: TSynLogInfo;
 {$ifdef MSWINDOWS}
 var tmp: AnsiString;
 {$endif}
+{$ifdef LINUXNOTBSD}
+var
+  tmp, mtmp: RawUTF8;
+  jvec: Array[0..1] of TioVec;
+{$endif}
 begin
   result := true;
   if not (Level in fFamily.fEchoToConsole) then
     exit;
+  {$ifdef LINUXNOTBSD}
+  if Family.EchoToConsoleUseJournal then begin
+    if length(Text)<18 then // should be at last "20200615 08003008  "
+      exit;
+    FormatUTF8('PRIORITY=%', [LOG_TO_SYSLOG[Level]],tmp);
+    jvec[0].iov_base := pointer(tmp);
+    jvec[0].iov_len := length(tmp);
+    // skip time "20200615 08003008  ." - journal do it for us; and first space after it
+    FormatUTF8('MESSAGE=%', [PUTF8Char(pointer(Text))+18],mtmp);
+    jvec[1].iov_base := pointer(mtmp);
+    jvec[1].iov_len := length(mtmp);
+    ExternalLibraries.sd_journal_sendv(@jvec[0],2);
+    exit;
+  end;
+  {$endif}
   TextColor(LOG_CONSOLE_COLORS[Level]);
   {$ifdef MSWINDOWS}
   tmp := CurrentAnsiConvert.UTF8ToAnsi(Text);
@@ -4075,7 +4149,7 @@ begin
   {$endif}
   writeln(tmp);
   {$else}
-  write(Text,#13#10);
+  writeln(Text);
   {$endif}
   ioresult;
   TextColor(ccLightGray);
@@ -4486,6 +4560,7 @@ begin
 end;
 
 procedure TSynLog.PerformRotation;
+const _LOG_SYNLZ: array[boolean] of TFileName = ('.synlz','.log');
 var currentMaxSynLZ: cardinal;
     i: integer;
     FN: array of TFileName;
@@ -4499,7 +4574,8 @@ begin
     if fFamily.fRotateFileCount>1 then begin
       SetLength(FN,fFamily.fRotateFileCount-1);
       for i := fFamily.fRotateFileCount-1 downto 1 do begin
-        FN[i-1] := ChangeFileExt(fFileName,'.'+IntToStr(i)+'.synlz');
+        FN[i-1] := ChangeFileExt(fFileName,
+          '.'+IntToStr(i)+_LOG_SYNLZ[fFamily.fRotateFileNoCompression]);
         if (currentMaxSynLZ=0) and FileExists(FN[i-1]) then
           currentMaxSynLZ := i;
       end;
@@ -4507,7 +4583,9 @@ begin
         DeleteFile(FN[currentMaxSynLZ-1]); // delete e.g. '9.synlz'
       for i := fFamily.fRotateFileCount-2 downto 1 do
         RenameFile(FN[i-1],FN[i]); // e.g. '8.synlz' -> '9.synlz'
-      FileSynLZ(fFileName,FN[0],LOG_MAGIC); // main -> '1.synlz'
+      if fFamily.fRotateFileNoCompression then
+        RenameFile(fFileName,FN[0]) else      // main -> '1.log'
+        FileSynLZ(fFileName,FN[0],LOG_MAGIC); // main -> '1.synlz'
     end;
     DeleteFile(fFileName);
   end;
@@ -5049,11 +5127,33 @@ var aWow64, feat: RawUTF8;
     OK: boolean;
 begin
   // 1. calculate fLines[] + fCount and fLevels[] + fLogProcNatural[] from .log content
-  fLineHeaderCountToIgnore := 3;
+  fLineHeaderCountToIgnore := 3; fIsJournald := false;
+  if IdemPChar(pointer(fMap.Buffer),'-- LOGS BEGIN AT') then begin
+    //-- Logs begin at Sun 2020-06-07 12:42:31 EEST, end at Thu 2020-06-18 18:08:52 EEST. --
+    fIsJournald := true;
+    fHeaderLinesCount := 1;
+    fLineHeaderCountToIgnore := 1;
+  end else begin
+    //2020-06-18T13:28:20.754089+0300 ub[12316]:
+    Iso8601ToDateTimePUTF8CharVar(pointer(fMap.Buffer),26,fStartDateTime);
+    if unaligned(fStartDateTime) <> 0 then begin
+      if (fMap.Buffer+8)^ <> ' ' then //20200821 14450738 ... - syn log without header
+        fIsJournald := true;
+      fHeaderLinesCount := 0;
+      fLineHeaderCountToIgnore := 0;
+    end;
+  end;
   inherited LoadFromMap(100);
   // 2. fast retrieval of header
   OK := false;
   try
+    // journald export or TSynLog WITHOUT regular header
+    if fIsJournald or (fLineHeaderCountToIgnore=0) then begin
+      if LineSizeSmallerThan(1,34) then exit;
+      Iso8601ToDateTimePUTF8CharVar(fLines[1],26,fStartDateTime);
+      if fStartDateTime=0 then
+        exit;
+    end else begin // TSynLog regular header
 {  C:\Dev\lib\SQLite3\exe\TestSQL3.exe 0.0.0.0 (2011-04-07 11:09:06)
    Host=BW013299 User=G018869 CPU=1*0-15-1027 OS=2.3=5.1.2600 Wow64=0 Freq=3579545
    TSynLog 1.13 LVCL 2011-04-07 12:04:09 }
@@ -5119,6 +5219,7 @@ begin
     end;
     if fStartDateTime=0 then
       exit;
+    end;
     // 3. compute fCount and fLines[] so that all fLevels[]<>sllNone
     CleanLevels(self);
     if Length(fLevels)-fCount>16384 then begin // size down only if worth it
@@ -5312,16 +5413,27 @@ procedure TSynLogFile.ProcessOneLine(LineBeg, LineEnd: PUTF8Char);
 var thread,n: cardinal;
     MS: integer;
     L: TSynLogInfo;
+    p: PUTF8Char;
+    dcOffset: integer;
 begin
   inherited ProcessOneLine(LineBeg,LineEnd);
   if length(fLevels)<fLinesMax then
     SetLength(fLevels,fLinesMax);
   if (fCount<=fLineHeaderCountToIgnore) or (LineEnd-LineBeg<24) then
     exit;
+  if fIsJournald then
+    dcOffset := 2 else // point to last 2 digit of year
+    dcOffset := 0;
   if fLineLevelOffset=0 then begin
     if (fCount>50) or not (LineBeg[0] in ['0'..'9']) then
       exit; // definitively does not sound like a .log content
-    if LineBeg[8]=' ' then begin
+    if fIsJournald then begin
+      p := PosChar(LineBeg, ']'); // time proc[pid]:
+      if p=nil then
+        exit; // not a log
+      fLineLevelOffset := (p - LineBeg) + 4; // ":  "
+      fDayCurrent := PInt64(LineBeg+dcOffset)^;
+    end else if LineBeg[8]=' ' then begin
       // YYYYMMDD HHMMSS is one char bigger than Timestamp
       fLineLevelOffset := 19;
       fDayCurrent := PInt64(LineBeg)^;
@@ -5341,8 +5453,8 @@ begin
   L := GetLogLevelFromText(LineBeg);
   if L=sllNone then
     exit;
-  if (fDayChangeIndex<>nil) and (fDayCurrent<>PInt64(LineBeg)^) then begin
-    fDayCurrent := PInt64(LineBeg)^;
+  if (fDayChangeIndex<>nil) and (fDayCurrent<>PInt64(LineBeg+dcOffset)^) then begin
+    fDayCurrent := PInt64(LineBeg+dcOffset)^;
     AddInteger(fDayChangeIndex,fCount-1);
   end;
   if fThreads<>nil then begin

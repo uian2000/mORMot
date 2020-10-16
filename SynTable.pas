@@ -698,6 +698,20 @@ type
     property UTF8Length: boolean read fUTF8Length write fUTF8Length;
   end;
 
+resourcestring
+  sInvalidIPAddress = '"%s" is an invalid IP v4 address';
+  sInvalidEmailAddress = '"%s" is an invalid email address';
+  sInvalidPattern = '"%s" does not match the expected pattern';
+  sCharacter01n = 'character,character,characters';
+  sInvalidTextLengthMin = 'Expect at least %d %s';
+  sInvalidTextLengthMax = 'Expect up to %d %s';
+  sInvalidTextChar = 'Expect at least %d %s %s,Expect up to %d %s %s,'+
+    'alphabetical,digital,punctuation,lowercase,uppercase,space,'+
+    'Too much spaces on the left,Too much spaces on the right';
+  sValidationFailed = '"%s" rule failed';
+  sValidationFieldVoid = 'An unique key field must not be void';
+  sValidationFieldDuplicate = 'Value already used for this unique key field';
+
 
 { ************ Database types and classes ************************** }
 
@@ -5214,7 +5228,7 @@ end;
 { TSynTable }
 
 {$ifdef CPUX86}
-function SortQWord(const A,B: QWord): integer;
+function SortQWord(const A,B: QWord): integer; {$ifdef FPC} nostackframe; assembler; {$endif}
 asm // Delphi x86 compiler is not efficient, and oldest even incorrect
         mov     ecx, [eax]
         mov     eax, [eax + 4]
@@ -5230,7 +5244,7 @@ asm // Delphi x86 compiler is not efficient, and oldest even incorrect
 @p:     mov     eax, 1
 end;
 
-function SortInt64(const A,B: Int64): integer;
+function SortInt64(const A,B: Int64): integer; {$ifdef FPC} nostackframe; assembler; {$endif}
 asm // Delphi x86 compiler is not efficient at compiling below code
         mov     ecx, [eax]
         mov     eax, [eax + 4]
@@ -10142,7 +10156,7 @@ end;
 
 {$ifdef CPUINTEL} // crc32c SSE4.2 hardware accellerated dword hash
 function crc32csse42(buf: pointer): cardinal;
-{$ifdef CPUX86}
+{$ifdef CPUX86} {$ifdef FPC} nostackframe; assembler; {$endif}
 asm
         mov     edx, eax
         xor     eax, eax
@@ -12346,7 +12360,7 @@ begin
   if result=0 then
     exit;
   count := result;
-  if count>length(Values) then // only set length is not big enough
+  if count>length(Values) then // change Values[] length only if not big enough
     SetLength(Values,count);
   PI := pointer(Values);
   fixedsize := ReadVarUInt32;
